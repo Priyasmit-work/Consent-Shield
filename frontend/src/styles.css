@@ -1,0 +1,163 @@
+@import "tailwindcss" source(none);
+@source "../src";
+@import "tw-animate-css";
+
+@custom-variant dark (&:is(.dark *));
+
+/*
+ * ConsentShield design system — warm editorial-security palette.
+ * No blue, no purple. Status colors always paired with a text label.
+ */
+
+@theme inline {
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+  --radius-2xl: calc(var(--radius) + 8px);
+  --radius-3xl: calc(var(--radius) + 12px);
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-destructive-foreground: var(--destructive-foreground);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --color-surface: var(--surface);
+  --color-forest: var(--forest);
+  --color-forest-deep: var(--forest-deep);
+  --color-sage: var(--sage);
+  --color-positive: var(--positive);
+  --color-warning: var(--warning);
+  --color-critical: var(--critical);
+  --color-neutral: var(--neutral);
+  --font-sans: "Inter", ui-sans-serif, system-ui, -apple-system, sans-serif;
+  --shadow-popup: 0 24px 60px -28px rgba(32, 32, 30, 0.32), 0 2px 6px -2px rgba(32, 32, 30, 0.08);
+  --shadow-soft: 0 1px 2px rgba(32, 32, 30, 0.04);
+}
+
+:root {
+  --radius: 0.75rem;
+  --background: #f7f5f0;
+  --foreground: #20201e;
+  --surface: #fffefa;
+  --card: #fffefa;
+  --card-foreground: #20201e;
+  --popover: #fffefa;
+  --popover-foreground: #20201e;
+  --primary: #183c32;
+  --primary-foreground: #f7f5f0;
+  --secondary: #efece4;
+  --secondary-foreground: #20201e;
+  --muted: #f1eee7;
+  --muted-foreground: #77736b;
+  --accent: #a7b7a3;
+  --accent-foreground: #183c32;
+  --destructive: #9c4036;
+  --destructive-foreground: #fffefa;
+  --border: #e3ded4;
+  --input: #e3ded4;
+  --ring: #183c32;
+  --forest: #183c32;
+  --forest-deep: #122c25;
+  --sage: #a7b7a3;
+  --positive: #2f6b4f;
+  --warning: #b16a32;
+  --critical: #9c4036;
+  --neutral: #8c887f;
+}
+
+@layer base {
+  * {
+    border-color: var(--color-border);
+  }
+
+  html {
+    -webkit-font-smoothing: antialiased;
+  }
+
+  body {
+    background-color: var(--color-background);
+    color: var(--color-foreground);
+    font-family: var(--font-sans);
+    font-feature-settings: "cv05", "ss01";
+  }
+
+  :focus-visible {
+    outline: 2px solid var(--forest);
+    outline-offset: 2px;
+    border-radius: 4px;
+  }
+}
+
+@utility tnum {
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: "tnum";
+}
+
+@utility cs-scroll {
+  scrollbar-width: thin;
+  scrollbar-color: var(--border) transparent;
+  &::-webkit-scrollbar {
+    width: 8px;
+  }
+  &::-webkit-scrollbar-thumb {
+    background: var(--border);
+    border-radius: 999px;
+  }
+}
+
+@keyframes cs-pulse-ring {
+  0% {
+    transform: scale(0.85);
+    opacity: 0.55;
+  }
+  70% {
+    transform: scale(1.6);
+    opacity: 0;
+  }
+  100% {
+    opacity: 0;
+  }
+}
+
+@keyframes cs-rise {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@utility cs-pulse {
+  animation: cs-pulse-ring 2s ease-out infinite;
+}
+
+@utility cs-rise {
+  animation: cs-rise 260ms ease-out both;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+  }
+}
