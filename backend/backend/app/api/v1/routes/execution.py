@@ -19,9 +19,20 @@ The plan is always bound to the scan's origin hostname; a client_context
 whose page_url hostname does not match is rejected as a mismatch rather
 than silently accepted, consistent with "reject stale or mismatched
 action plans" (Section 6) and "must reject stale plans" (Section 8).
+
+Execution (WEBCMD_MODE=live only): once a plan reaches `approved`, this
+route calls webcmd_client.click_banner_action() to actually click the
+matching button on the live site in a fresh webcmd browser session. This
+is a real click against the real site, but it happens in webcmd's own
+browser session -- not the user's visible browser tab. If webcmd isn't
+installed, times out, errors, or simply can't find a matching button,
+the plan is still returned as `approved` (the backend's own rules were
+satisfied) but the response message reports that the live click did not
+succeed, instead of silently pretending it did.
 """
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime, timezone
 from urllib.parse import urlparse
 from uuid import UUID, uuid4
@@ -34,6 +45,7 @@ from app.repositories.preferences_repository import PreferencesRepository
 from app.repositories.scans_repository import ExecutionPlanRecord, ScansRepository
 from app.schemas.common import ApiResponse
 from app.schemas.execution import ApplyPlanRequest, ApplyPlanResponse, ApplyPlanStatus, default_expiry
+from app.services.webcmd_client import WebcmdError, click_banner_action
 
 router = APIRouter(tags=["execution"])
 
@@ -122,6 +134,35 @@ async def apply_plan(
     )
     repo.save_plan(plan_record)
 
+    message = "Protection plan approved."
+
+    if settings.webcmd_mode == "live" and matching_action:
+        button_label = matching_action.get("label", "")
+        try:
+            click_result = await asyncio.to_thread(
+                click_banner_action, record.target_url, button_label
+            )
+            if click_result.clicked:
+                message = (
+                    f"Live click succeeded: clicked '{click_result.matched_label}' "
+                    f"on {scan_hostname}."
+                )
+            elif not click_result.banner_found:
+                message = (
+                    "Plan approved, but no consent banner was found on the live "
+                    "site during execution (it may only have appeared once, or "
+                    "the page changed since the scan)."
+                )
+            else:
+                message = (
+                    "Plan approved, but the live click could not find a button "
+                    f"matching '{button_label}' on the current page."
+                )
+                if click_result.click_error:
+                    message += f" ({click_result.click_error})"
+        except WebcmdError as exc:
+            message = f"Plan approved, but the live click failed: {exc}"
+
     return ApiResponse(
         data=ApplyPlanResponse(
             execution_id=execution_id,
@@ -130,5 +171,6 @@ async def apply_plan(
             allowed_locators=allowed_locators,
             blocked_actions=list(blocked_actions),
             expires_at=expires_at,
+            message=message,
         )
     )

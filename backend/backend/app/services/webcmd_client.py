@@ -14,6 +14,12 @@ frame whose URL/name contains "consent"/"cmp"), and extracts:
   - the banner's button labels
   - any cookie/privacy policy links found inside the banner
 
+It also exposes click_banner_action(), which drives a fresh webcmd
+session to the same site and clicks whichever banner button matches an
+approved plan's label -- this is how an approved execution plan (see
+app/api/v1/routes/execution.py) is actually carried out against the
+live site once WEBCMD_MODE=live and the plan has been approved.
+
 Design notes:
   - webcmd's `browser run` executes scripts in a QuickJS sandbox, which
     does NOT expose `process.env`. The target URL therefore cannot be
@@ -25,10 +31,12 @@ Design notes:
     code, just a safely-quoted data value inside a fixed script.
   - Every call creates a fresh webcmd session and closes it afterwards,
     since sessions are stateful (a banner already "seen" once may not
-    re-render identically) and we want each scan to be independent.
+    re-render identically) and we want each scan/action to be
+    independent.
   - All subprocess calls have a timeout; failures raise WebcmdError so
-    the caller (browser_agent.py) can fall back to mock evidence or
-    surface a scan failure cleanly instead of hanging.
+    the caller (browser_agent.py / execution.py) can fall back to mock
+    evidence, report failure, or surface a scan failure cleanly instead
+    of hanging.
 """
 from __future__ import annotations
 
@@ -112,6 +120,99 @@ return {
 };
 """
 
+# Navigates to the target URL, locates the same consent banner frame as
+# the detection script, and clicks whichever button's visible text
+# matches __BUTTON_LABEL_JSON__ (exact match first, then substring
+# match as a fallback since live sites may render slightly different
+# casing/whitespace than what was captured during the scan).
+_CLICK_SCRIPT_TEMPLATE = r"""
+const targetUrl = __TARGET_URL_JSON__;
+const buttonLabel = __BUTTON_LABEL_JSON__;
+
+await page.goto(targetUrl, { waitUntil: "domcontentloaded", timeout: 20000 });
+await page.waitForTimeout(3000);
+
+const mainFrame = page.mainFrame();
+const childFrames = page.frames().filter((f) => f !== mainFrame);
+
+const cmpPattern = /sourcepoint|onetrust|cookiebot|didomi|quantcast|trustarc|consent|cmp/i;
+
+let bannerFrame = null;
+
+for (const frame of childFrames) {
+  const url = frame.url() || "";
+  const name = frame.name() || "";
+  if (cmpPattern.test(url) || cmpPattern.test(name)) {
+    bannerFrame = frame;
+    break;
+  }
+}
+
+if (!bannerFrame) {
+  let bestLen = 0;
+  for (const frame of childFrames) {
+    const body = await frame
+      .locator("body")
+      .innerText({ timeout: 1000 })
+      .catch(() => "");
+    if (body.length > bestLen && /cookie|consent|privacy/i.test(body)) {
+      bestLen = body.length;
+      bannerFrame = frame;
+    }
+  }
+}
+
+let clicked = false;
+let matchedLabel = null;
+let clickError = null;
+
+if (bannerFrame) {
+  const buttonEls = await bannerFrame.locator("button").all();
+
+  // Pass 1: exact (case-insensitive) label match.
+  for (const b of buttonEls) {
+    const label = (await b.innerText().catch(() => "")).trim();
+    if (label && label.toLowerCase() === buttonLabel.toLowerCase()) {
+      try {
+        await b.click({ timeout: 5000 });
+        clicked = true;
+        matchedLabel = label;
+      } catch (e) {
+        clickError = String(e);
+      }
+      break;
+    }
+  }
+
+  // Pass 2: substring match, only if pass 1 found nothing to click.
+  if (!clicked && !clickError) {
+    for (const b of buttonEls) {
+      const label = (await b.innerText().catch(() => "")).trim();
+      if (label && label.toLowerCase().includes(buttonLabel.toLowerCase())) {
+        try {
+          await b.click({ timeout: 5000 });
+          clicked = true;
+          matchedLabel = label;
+        } catch (e) {
+          clickError = String(e);
+        }
+        break;
+      }
+    }
+  }
+}
+
+await page.waitForTimeout(1000);
+
+return {
+  url: targetUrl,
+  bannerFound: !!bannerFrame,
+  clicked,
+  matchedLabel,
+  clickError,
+};
+"""
+
 
 class WebcmdError(RuntimeError):
     """Raised when the webcmd CLI fails, times out, or returns bad data."""
@@ -130,6 +231,15 @@ class CookieBannerScanResult:
     banner_frame_url: Optional[str]
     buttons: list[str] = field(default_factory=list)
     policy_links: list[PolicyLink] = field(default_factory=list)
+
+
+@dataclass
+class BannerActionResult:
+    url: str
+    banner_found: bool
+    clicked: bool
+    matched_label: Optional[str]
+    click_error: Optional[str] = None
 
 
 def _run(args: list[str], timeout: int) -> dict:
@@ -159,15 +269,6 @@ def _run(args: list[str], timeout: int) -> dict:
         return json.loads(stdout)
     except json.JSONDecodeError as exc:
         raise WebcmdError(f"webcmd output was not valid JSON: {stdout[:500]}") from exc
-
-
-def _create_session(timeout: int) -> str:
-    data = _run(["session", "create"], timeout=timeout)
-    # `webcmd session create` prints plain text ("id: session_xxx\nkind: explicit"),
-    # not JSON -- handle both shapes defensively.
-    if isinstance(data, dict) and "id" in data:
-        return data["id"]
-    raise WebcmdError(f"Could not parse session id from webcmd output: {data}")
 
 
 def _create_session_text(timeout: int) -> str:
@@ -212,25 +313,7 @@ def _close_session(session_id: str, timeout: int) -> None:
         pass
 
 
-def scan_cookie_banner(
-    target_url: str, timeout: int = DEFAULT_TIMEOUT_SECONDS
-) -> CookieBannerScanResult:
-    """
-    Launches a fresh webcmd browser session, navigates to `target_url`,
-    and extracts real cookie-consent banner evidence (detection, button
-    labels, policy links).
-
-    Raises WebcmdError on any failure (webcmd not installed, browser
-    bridge unavailable, navigation/timeout failure, unparseable output).
-    Callers should catch WebcmdError and decide whether to fall back to
-    mock evidence or fail the scan.
-    """
-    session_id = _create_session_text(timeout=timeout)
-
-    script = _SCRIPT_TEMPLATE.replace(
-        "__TARGET_URL_JSON__", json.dumps(target_url)
-    )
-
+def _run_script(session_id: str, script: str, timeout: int) -> dict:
     tmp_path: Optional[Path] = None
     try:
         with tempfile.NamedTemporaryFile(
@@ -246,11 +329,35 @@ def scan_cookie_banner(
 
         if not data.get("ok"):
             error = data.get("error", {})
-            raise WebcmdError(
-                f"webcmd browser run failed: {error.get('message', data)}"
-            )
+            raise WebcmdError(f"webcmd browser run failed: {error.get('message', data)}")
 
-        result = data.get("result") or {}
+        return data.get("result") or {}
+    finally:
+        if tmp_path is not None:
+            try:
+                tmp_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+
+def scan_cookie_banner(
+    target_url: str, timeout: int = DEFAULT_TIMEOUT_SECONDS
+) -> CookieBannerScanResult:
+    """
+    Launches a fresh webcmd browser session, navigates to `target_url`,
+    and extracts real cookie-consent banner evidence (detection, button
+    labels, policy links).
+
+    Raises WebcmdError on any failure (webcmd not installed, browser
+    bridge unavailable, navigation/timeout failure, unparseable output).
+    Callers should catch WebcmdError and decide whether to fall back to
+    mock evidence or fail the scan.
+    """
+    session_id = _create_session_text(timeout=timeout)
+    try:
+        script = _SCRIPT_TEMPLATE.replace("__TARGET_URL_JSON__", json.dumps(target_url))
+        result = _run_script(session_id, script, timeout=timeout)
+
         return CookieBannerScanResult(
             url=result.get("url", target_url),
             banner_detected=bool(result.get("bannerDetected")),
@@ -262,9 +369,42 @@ def scan_cookie_banner(
             ],
         )
     finally:
-        if tmp_path is not None:
-            try:
-                tmp_path.unlink(missing_ok=True)
-            except OSError:
-                pass
+        _close_session(session_id, timeout=timeout)
+
+
+def click_banner_action(
+    target_url: str, button_label: str, timeout: int = DEFAULT_TIMEOUT_SECONDS
+) -> BannerActionResult:
+    """
+    Launches a fresh webcmd browser session, navigates to `target_url`,
+    finds the consent banner, and clicks whichever button's text matches
+    `button_label` (exact match first, then substring fallback).
+
+    This is how an *approved* execution plan (execution.py) is actually
+    carried out against the live site -- it is only ever called after
+    the backend's own confirmation/auto-apply rules have already been
+    satisfied; this function itself has no opinion on consent policy,
+    it only clicks the button it's told to click.
+
+    Raises WebcmdError on any failure (webcmd not installed, browser
+    bridge unavailable, navigation/timeout failure, unparseable output).
+    A "no banner / no matching button found" outcome is NOT an error --
+    it's reported via `banner_found` / `clicked` on the returned result
+    so the caller can decide how to report that back to the user.
+    """
+    session_id = _create_session_text(timeout=timeout)
+    try:
+        script = _CLICK_SCRIPT_TEMPLATE.replace(
+            "__TARGET_URL_JSON__", json.dumps(target_url)
+        ).replace("__BUTTON_LABEL_JSON__", json.dumps(button_label))
+        result = _run_script(session_id, script, timeout=timeout)
+
+        return BannerActionResult(
+            url=result.get("url", target_url),
+            banner_found=bool(result.get("bannerFound")),
+            clicked=bool(result.get("clicked")),
+            matched_label=result.get("matchedLabel"),
+            click_error=result.get("clickError"),
+        )
+    finally:
         _close_session(session_id, timeout=timeout)

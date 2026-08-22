@@ -76,7 +76,16 @@ class BrowserAgentService:
                 workflow_mode = WorkflowMode.explored
                 record.activity_log.append(self._log("navigation", "Opened footer and legal navigation links"))
                 policy_urls = [f"{origin}/privacy", f"{origin}/cookie-policy"]
-                banner_detected = bool(request.client_context and request.client_context.cookie_banner_detected)
+                # WEBCMD_MODE=mock has no live browsing, so there is no real
+                # signal for banner presence. Default to "detected" so the
+                # mock evidence/plan path (which always fabricates banner
+                # cookie data below) is demoed end-to-end, unless the
+                # frontend explicitly told us otherwise.
+                banner_detected = (
+                    request.client_context.cookie_banner_detected
+                    if request.client_context and request.client_context.cookie_banner_detected is not None
+                    else True
+                )
 
             record.workflow_mode = workflow_mode.value
             await self._step(record, repo, ScanStatusValue.extracting, 45, "Reading cookie and privacy information")
