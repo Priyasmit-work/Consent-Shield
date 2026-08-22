@@ -1,79 +1,185 @@
-# ConsentShield — combined project
+# ConsentShield — Setup & webcmd Integration Notes
 
-This folder contains both halves of ConsentShield, wired together:
+This README documents the current local setup for ConsentShield
+(FastAPI backend + TanStack Start frontend + `webcmd` live browser
+driver), what was changed to wire live scanning and live execution
+together, and how to run everything.
 
 ```
 ConsentShield/
-  backend/    FastAPI service implementing the scan/preferences/apply-plan API
-  frontend/   TanStack Start (React) popup UI that calls the backend for real
+  backend/
+    backend/app/     FastAPI service (scan, preferences, apply-plan API)
+    .venv/           Python virtual environment
+    .env             Backend config (WEBCMD_MODE, CORS, auth mode, etc.)
+  frontend/           TanStack Start (React) UI that calls the backend
 ```
 
-The frontend originally shipped with a fully mocked `api.ts` (no network
-calls at all). It's now been rewired to call the real backend endpoints,
-and the backend now sends CORS headers so the browser is allowed to call it.
-What changed, concretely:
+The `webcmd` CLI itself lives in a separate folder outside this
+project (wherever you extracted `webcmd-main.zip`), and is installed
+onto `PATH` globally via `npm link`.
 
-- **backend/app/main.py** — added `CORSMiddleware`, configured via a new
-  `CORS_ORIGINS` env var (`backend/.env.example`), defaulting to the Vite
-  dev server ports (`5173`, `3000`).
-- **frontend/src/lib/consentshield/api.ts** — rewritten to make real `fetch`
-  calls: `getScan()` POSTs `/api/v1/scans` and polls `GET /api/v1/scans/{id}`
-  until it reaches a terminal status; `getSettings`/`saveSettings` call
-  `GET`/`PUT /api/v1/me/preferences`; `applyPlan()` calls
-  `POST /api/v1/scans/{id}/apply-plan`. Backend response shapes are mapped
-  to the frontend's existing `ScanResult`/`Settings` types.
-- **frontend/src/routes/index.tsx** — the popup now drives its screens off
-  real API responses (loads preferences on mount, runs a real scan, applies
-  a real protection plan) instead of static mock data. A URL input was
-  added to `ScanIntro` since this is a web preview with no real browser tab
-  to read a URL from.
-- **frontend/.env.example** / **src/vite-env.d.ts** — new `VITE_API_BASE_URL`
-  and `VITE_DEV_USER_ID` config.
+---
 
-## Running it locally
+## 1. Running the backend
 
-**1. Backend**
+```powershell
+cd ConsentShield\backend\backend
+..\.venv\Scripts\Activate.ps1
+uvicorn app.main:app --host 0.0.0.0 --port 8000
+```
 
-```bash
-cd backend
-python -m venv .venv && source .venv/bin/activate
+- API docs: http://localhost:8000/docs
+- Storage is in-memory by default (no Supabase project required).
+- Auth defaults to `AUTH_MODE=dev`, which accepts any `X-Dev-User-Id`
+  header instead of a real token.
+
+If the venv doesn't exist yet:
+
+```powershell
+cd ConsentShield\backend
+python -m venv .venv
+.venv\Scripts\Activate.ps1
 pip install -r requirements.txt
-cp .env.example .env          # defaults are runnable with zero setup
-cd backend
-uvicorn app.main:app --reload --port 8000
+Copy-Item .env.example .env
 ```
 
-Docs at http://localhost:8000/docs. Storage is in-memory by default (no
-Supabase project required); auth defaults to `AUTH_MODE=dev`, which accepts
-any `X-Dev-User-Id` header instead of a real token.
+## 2. Running the frontend
 
-**2. Frontend**
-
-```bash
-cd frontend
-cp .env.example .env          # points at http://localhost:8000 by default
-npm install                   # or bun install
-npm run dev                   # or bun run dev
+```powershell
+cd ConsentShield\frontend
+npm install
+npm run dev -- --host 0.0.0.0 --port 5173
 ```
 
-Open the printed local URL. Enter a `https://` URL in the scan screen and
-click **Scan privacy** — this now creates a real scan against the backend,
-polls it to completion, and renders the real evidence/plan. Settings are
-persisted to the backend's `/me/preferences` endpoint, and applying a
-protection plan calls the backend's `/scans/{id}/apply-plan` endpoint (which,
-per the backend's own safety rules, only actually "approves" an executable
-plan when Settings → *Allow automatic protection* is on with a non-Manual
-privacy mode — otherwise it correctly reports `awaiting_user_confirmation`,
-which the popup now surfaces instead of pretending to execute).
+Open http://localhost:5173. If `.env` doesn't exist yet:
 
-**CORS**: if you serve the frontend from a different host/port than the
-defaults above, add it to `CORS_ORIGINS` in `backend/.env`.
+```powershell
+Copy-Item .env.example .env
+```
 
-## Verified
+It points `VITE_API_BASE_URL` at `http://localhost:8000` by default.
 
-- `npx tsc --noEmit` — passes with no errors.
-- `npm run build` — production build succeeds.
-- `pytest tests/ -q` — all 15 backend tests pass.
-- Manual smoke test: CORS preflight, `POST /scans` → poll → `ready`,
-  `GET`/`PUT /me/preferences`, and `POST /scans/{id}/apply-plan` were all
-  exercised against a running server and match what `api.ts` expects.
+## 3. Setting up webcmd (live browser driver)
+
+```powershell
+cd path\to\webcmd-main\ConsentShield-main\webcmd
+npm install --ignore-scripts
+npm run build
+npm link --ignore-scripts
+webcmd --version   # should print a version number, e.g. 0.7.4
+```
+
+`--ignore-scripts` is needed on Windows because the package's `prepare`
+script uses a Unix-only shell check (`[ -d src ] && ...`) that `cmd.exe`
+doesn't understand. The manual `npm run build` step does the same work
+without relying on that check.
+
+In `backend/.env`, set:
+
+```
+WEBCMD_MODE=live
+```
+
+If `webcmd` isn't resolvable on `PATH` from inside the Python process,
+set an explicit path instead:
+
+```
+WEBCMD_BIN=C:\path\to\webcmd\dist\src\main.js
+```
+
+**Restart the backend after any `.env` change** — environment variables
+are only read once at process startup.
+
+---
+
+## 4. What was changed to wire webcmd in
+
+The project originally shipped with `WEBCMD_MODE=live` as an
+unimplemented "integration seam" — the toggle existed in `.env` but no
+code path actually called `webcmd`. The following two integration
+points were added:
+
+### a) Live banner detection (`browser_agent.py`)
+
+`BrowserAgentService.run_scan` now calls
+`webcmd_client.scan_cookie_banner(url)` when `WEBCMD_MODE=live`,
+instead of only ever fabricating mock evidence. It:
+
+- Navigates to the target URL in a fresh `webcmd` session.
+- Detects the consent-banner iframe (Sourcepoint, OneTrust, Cookiebot,
+  Didomi, Quantcast, TrustArc, or any frame matching `consent`/`cmp`).
+- Extracts the real button labels and any cookie/privacy policy links
+  found inside it.
+- Falls back to the existing mock evidence path (with a logged
+  warning) if `webcmd` isn't installed, times out, or errors — a scan
+  never hard-fails just because live browsing didn't work.
+
+Real button labels are then matched (by keyword) onto the
+`accept_all` / `reject_optional` / `manage_preferences` actions the
+rest of the app expects, instead of always using hardcoded label text.
+
+### b) Live execution (`execution.py` + `webcmd_client.py`)
+
+A new `click_banner_action(url, button_label)` function was added to
+`webcmd_client.py`. It opens a fresh `webcmd` session, re-locates the
+same consent banner, and clicks whichever button's text matches the
+approved plan's label (exact match, then substring fallback).
+
+`POST /scans/{id}/apply-plan` now calls this function **only after**
+the backend's own existing approval rules are satisfied — this route's
+"must not click a consent button by default" safety rule (Section 8 of
+the original design) was **not changed**. Concretely, a live click is
+only attempted when:
+
+1. `preferences.auto_apply` is `True`, **and**
+2. the user's selected privacy mode is not `Manual`, **and**
+3. `WEBCMD_MODE=live`.
+
+If any of those aren't true, the endpoint still returns
+`awaiting_user_confirmation` exactly as before, and no click is ever
+attempted. This preserves the original "never silently act on the
+user's behalf" guarantee — it only adds a real execution path for the
+case that was already meant to be automatic.
+
+**Important caveat:** the live click happens inside `webcmd`'s own
+headless browser session, not in the user's own visible browser tab.
+It proves the backend can drive a real consent choice against the real
+site, but it will not visibly change anything in your own Chrome
+window. A true "changes cookies in the tab I'm looking at" experience
+would require a real browser extension content script reading the
+approved plan's `allowed_locators` and clicking in-page — that's a
+separate, bigger piece of work than what's wired up here.
+
+---
+
+## 5. Known open item
+
+As of this writing, applying a protection plan from the UI still
+returns `awaiting_user_confirmation` ("Confirm in the extension before
+changing cookie consent") even after selecting a non-Manual privacy
+mode (e.g. Strict). This means `preferences.auto_apply` is still
+`False` on the backend — privacy mode and the auto-apply toggle are
+two separate settings. There should be a separate "Allow automatic
+protection" switch elsewhere in the Settings screen; its state (and
+whether the frontend is actually sending `auto_apply: true` when
+saving preferences) still needs to be confirmed before a live click
+will ever be attempted.
+
+To check directly against the backend:
+
+```powershell
+curl http://localhost:8000/api/v1/me/preferences -H "X-Dev-User-Id: demo-user"
+```
+
+Look for `"auto_apply"` in the response — if it's `false`, that's the
+setting to fix, either in the UI or via:
+
+```powershell
+curl -X PUT http://localhost:8000/api/v1/me/preferences `
+  -H "X-Dev-User-Id: demo-user" `
+  -H "Content-Type: application/json" `
+  -d '{"auto_apply": true, "privacy_mode": "strict"}'
+```
+
+(Adjust the body to match whatever fields `PreferencesRepository`
+actually expects — check `app/schemas/preferences.py` if this 422s.)
