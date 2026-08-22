@@ -14,8 +14,7 @@ user opt-in) automatically applies the privacy-safe choice.
  | <img width="540" height="717" alt="ConsentShield 1" src="https://github.com/user-attachments/assets/0793a659-b951-4ad0-b71e-df7f98f65fc4" />
  |
 
-> Add your two screenshots to `docs/screenshot-1.png` and `docs/screenshot-2.png`
-> (or update the paths above to match your filenames).
+
 
 ---
 
