@@ -6,10 +6,10 @@ ConsentShield is an autonomous privacy assistant and cookie consent enforcement 
 
 ---
 
-<!-- 📸 Main Dashboard / Hero Screenshot Placeholder -->
-<p align="center">
-  <img src="docs/screenshots/dashboard-preview.png" alt="ConsentShield Dashboard Overview" width="85%" />
-</p>
+![Uploading Screenshot 2026-08-22 122540.png…]()
+
+
+
 
 ---
 
