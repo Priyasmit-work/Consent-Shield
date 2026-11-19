@@ -35,9 +35,22 @@ class Settings(BaseSettings):
     supabase_url: str = ""
     supabase_service_role_key: str = ""
 
-    # Browser agent (webcmd)
-    webcmd_mode: str = "mock"  # mock | live
-    webcmd_api_key: str = ""
+    # Browser agent (Playwright + a free/open LLM)
+    browser_mode: str = "mock"  # mock | live
+    agent_headless: bool = False  # False = you can watch the browser click
+    # Use your installed browser, so no Chromium download is needed:
+    # "chrome" (Google Chrome) | "msedge" (Microsoft Edge) | "" (Playwright's own Chromium)
+    agent_browser_channel: str = "chrome"
+    agent_browser_path: str = ""  # optional full path to chrome.exe; overrides the channel
+    # After the agent clicks, keep its browser window open this many seconds so you
+    # can see the result (0 = close immediately). The API replies right away.
+    agent_keep_open_seconds: int = 30
+    # Any OpenAI-compatible endpoint works: NVIDIA NIM (Nemotron), OpenRouter,
+    # Ollama, Groq... Set agent_provider="anthropic" to use Claude instead.
+    agent_provider: str = "openai"  # openai | anthropic
+    agent_base_url: str = "https://integrate.api.nvidia.com/v1"
+    agent_api_key: str = ""  # empty = no model call, keyword rules are used
+    agent_model: str = "nvidia/nemotron-3-nano-30b-a3b"
 
     # Model adapter
     model_mode: str = "heuristic"  # heuristic | live

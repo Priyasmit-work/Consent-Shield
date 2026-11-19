@@ -6,7 +6,7 @@ reuse website workflows, finding cookie/privacy-policy links, extracting
 evidence, detecting navigation failures, and returning a `reused`,
 `explored`, or `repaired` workflow mode.
 
-WEBCMD_MODE=mock (default): this sandbox has no general internet egress,
+BROWSER_MODE=mock (default): this sandbox has no general internet egress,
 so live browsing of an arbitrary target URL is not possible here. This
 mode provides a deterministic, clearly-labeled exploration simulation --
 enough to drive the full scan lifecycle, evidence schema, and workflow
@@ -15,9 +15,8 @@ API contract. It fabricates plausible per-category cookie evidence tied
 to the target hostname; it does not claim to have inspected the real
 site's real policies.
 
-WEBCMD_MODE=live is the integration seam for a real webcmd client -- swap
-`_explore_live` in for `_explore_mock` once webcmd credentials are
-available; nothing else in the backend needs to change.
+BROWSER_MODE=live uses the AI browser agent (services/agent_browser.py):
+Playwright opens the site and Claude classifies the real banner buttons.
 """
 from __future__ import annotations
 
@@ -39,6 +38,7 @@ from app.schemas.scans import (
 )
 from app.services.privacy_analyzer import PrivacyAnalyzer
 from app.services.protection_planner import ProtectionPlanner
+from app.services.agent_browser import AgentBrowserError, BannerOption, scan_cookie_banner
 
 # In-process cache of "learned" workflows per hostname, so a second scan of
 # the same site demonstrates FR-9 / Section 14 workflow reuse. This is
@@ -76,7 +76,7 @@ class BrowserAgentService:
                 workflow_mode = WorkflowMode.explored
                 record.activity_log.append(self._log("navigation", "Opened footer and legal navigation links"))
                 policy_urls = [f"{origin}/privacy", f"{origin}/cookie-policy"]
-                # WEBCMD_MODE=mock has no live browsing, so there is no real
+                # BROWSER_MODE=mock has no live browsing, so there is no real
                 # signal for banner presence. Default to "detected" so the
                 # mock evidence/plan path (which always fabricates banner
                 # cookie data below) is demoed end-to-end, unless the
@@ -86,6 +86,22 @@ class BrowserAgentService:
                     if request.client_context and request.client_context.cookie_banner_detected is not None
                     else True
                 )
+
+            live_actions = None
+            if self._settings.browser_mode == "live":
+                try:
+                    scan = await asyncio.to_thread(scan_cookie_banner, self._settings, request.url)
+                    banner_detected = scan.banner_detected
+                    live_actions = self._actions_from_options(scan.options)
+                    record.activity_log.append(
+                        self._log("navigation", f"Live scan found {len(scan.buttons)} banner buttons: {scan.buttons}")
+                    )
+                    if scan.policy_links:
+                        policy_urls = [pl.href for pl in scan.policy_links] + list(policy_urls)
+                except AgentBrowserError as exc:
+                    record.activity_log.append(
+                        self._log("error", f"Live scan failed, using demo data instead: {exc}")
+                    )
 
             record.workflow_mode = workflow_mode.value
             await self._step(record, repo, ScanStatusValue.extracting, 45, "Reading cookie and privacy information")
@@ -103,7 +119,7 @@ class BrowserAgentService:
 
             banner = BannerFindings(
                 detected=banner_detected,
-                actions=self._banner_actions(),
+                actions=live_actions if live_actions is not None else self._banner_actions(),
                 default_state="unknown",
                 dark_pattern_flags=(
                     ["reject_option_less_prominent"] if banner_detected else []
@@ -165,6 +181,21 @@ class BrowserAgentService:
         }
 
     @staticmethod
+    def _actions_from_options(options: list[BannerOption]) -> list[BannerAction]:
+        """Turn the agent's classified banner options into plan actions (one per action type)."""
+        sensitivity = {"reject_optional": "low", "manage_preferences": "medium", "accept_all": "high"}
+        found: dict[str, BannerAction] = {}
+        for opt in options:
+            if opt.action in sensitivity and opt.action not in found:
+                found[opt.action] = BannerAction(
+                    action=ConsentAction(opt.action),
+                    label=opt.label,
+                    locator=f"semantic:button[name={opt.label}]",
+                    sensitivity=sensitivity[opt.action],
+                )
+        return list(found.values())
+
+    @staticmethod
     def _banner_actions() -> list[BannerAction]:
         return [
             BannerAction(
@@ -192,7 +223,7 @@ class BrowserAgentService:
         hostname: str, policy_urls: list[str], focus: list[str]
     ) -> list[EvidenceObject]:
         """
-        WEBCMD_MODE=mock evidence generation. Ties every excerpt to a
+        BROWSER_MODE=mock evidence generation. Ties every excerpt to a
         real-looking source URL and a short, clearly-synthetic excerpt --
         never claimed as a verbatim quote from the live site.
         """

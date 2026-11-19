@@ -20,11 +20,11 @@ whose page_url hostname does not match is rejected as a mismatch rather
 than silently accepted, consistent with "reject stale or mismatched
 action plans" (Section 6) and "must reject stale plans" (Section 8).
 
-Execution (WEBCMD_MODE=live only): once a plan reaches `approved`, this
-route calls webcmd_client.click_banner_action() to actually click the
-matching button on the live site in a fresh webcmd browser session. This
-is a real click against the real site, but it happens in webcmd's own
-browser session -- not the user's visible browser tab. If webcmd isn't
+Execution (BROWSER_MODE=live only): once a plan reaches `approved`, this
+route calls agent_browser.click_banner_action() to actually click the
+matching button on the live site in a fresh browser window driven by the AI agent. This
+is a real click against the real site, but it happens in the agent's own
+browser window -- not the user's visible browser tab. If Playwright isn't
 installed, times out, errors, or simply can't find a matching button,
 the plan is still returned as `approved` (the backend's own rules were
 satisfied) but the response message reports that the live click did not
@@ -45,7 +45,7 @@ from app.repositories.preferences_repository import PreferencesRepository
 from app.repositories.scans_repository import ExecutionPlanRecord, ScansRepository
 from app.schemas.common import ApiResponse
 from app.schemas.execution import ApplyPlanRequest, ApplyPlanResponse, ApplyPlanStatus, default_expiry
-from app.services.webcmd_client import WebcmdError, click_banner_action
+from app.services.agent_browser import AgentBrowserError, click_banner_action
 
 router = APIRouter(tags=["execution"])
 
@@ -136,11 +136,15 @@ async def apply_plan(
 
     message = "Protection plan approved."
 
-    if settings.webcmd_mode == "live" and matching_action:
+    if settings.browser_mode == "live" and matching_action:
         button_label = matching_action.get("label", "")
         try:
             click_result = await asyncio.to_thread(
-                click_banner_action, record.target_url, button_label
+                click_banner_action,
+                settings,
+                record.target_url,
+                button_label,
+                body.requested_action.value,
             )
             if click_result.clicked:
                 message = (
@@ -160,7 +164,7 @@ async def apply_plan(
                 )
                 if click_result.click_error:
                     message += f" ({click_result.click_error})"
-        except WebcmdError as exc:
+        except AgentBrowserError as exc:
             message = f"Plan approved, but the live click failed: {exc}"
 
     return ApiResponse(
